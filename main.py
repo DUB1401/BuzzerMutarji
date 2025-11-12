@@ -1,0 +1,139 @@
+from Source.Core.Materials import MaterialsValidator
+from Source.UI.Keyboards import ReplyKeyboards
+from Source.UI.CLI import COMMANDS
+from Source import Functions
+
+from dublib.TelebotUtils import TeleCache, TeleMaster, UsersManager
+from dublib.Methods.System import CheckPythonMinimalVersion, Clear
+from dublib.Methods.Filesystem import MakeRootDirectories
+from dublib.CLI.Terminalyzer import Terminalyzer
+from dublib.Engine.Configurator import Config
+
+from badwords import ProfanityFilter
+from telebot import types
+import telebot
+
+#==========================================================================================#
+# >>>>> ИНИЦИАЛИЗАЦИЯ СКРИПТА <<<<< #
+#==========================================================================================#
+
+Clear()
+CheckPythonMinimalVersion(3, 10)
+MakeRootDirectories(("Data/Users"))
+
+Settings = Config("Settings.json")
+Settings.load()
+Bot = telebot.TeleBot(Settings["bot_token"])
+Master = TeleMaster(Bot)
+UsersManagerObject = UsersManager("Data/Users")
+Cacher = TeleCache()
+Cacher.set_bot(Bot)
+Cacher.set_chat_id(Settings["cache_chat_id"])
+ProfanityFilterObject = ProfanityFilter()
+ProfanityFilterObject.init(["ru", "en"])
+
+#==========================================================================================#
+# >>>>> ОБРАБОТКА АРГУМЕНТОВ ЗАПУСКА <<<<< #
+#==========================================================================================#
+
+Analyzer = Terminalyzer()
+Analyzer.helper.enable(True)
+CommandData = Analyzer.check_commands(COMMANDS)
+
+if CommandData and CommandData.name:
+	Cased = True
+
+	match CommandData.name:
+
+		case "materials": MaterialsValidator().print_materials()
+		case "translate": print("Not implemented.")
+		case "validate": MaterialsValidator().validate()
+
+		case _: Cased = False
+
+	if Cased: exit()
+
+#==========================================================================================#
+# >>>>> ОБРАБОТКА КОМАНД <<<<< #
+#==========================================================================================#
+
+@Bot.message_handler(commands = ["start"])
+def Command(Message: types.Message):
+	User = UsersManagerObject.auth(Message.from_user)
+	User.set_property("mode", "to", force = False)
+
+	Caption = (
+		"Хай, бро!" + " 👋",
+		"Эта типа транслейтер с зумерского на нормисский и обратно. Чекни сам, это реально имба!" + "\n",
+		"Приветствуем!" + " 👋",
+		"Это переводчик с зумерского на нормальный и обратно.",
+		"Отправляйте любую информацию и наслаждайтесь переводом!" + "\n",
+		"<i>" + "Поддерживает голосовой ввод" + "</i>"
+	)
+
+	Bot.send_animation(
+		chat_id = User.id,
+		animation = Cacher.get_real_cached_file("Materials/Animation/start.mp4", autoupload_type = types.InputMediaAnimation).file_id,
+		caption = "\n".join(Caption),
+		parse_mode = "HTML",
+		reply_markup = ReplyKeyboards.Menu()
+	)
+
+#==========================================================================================#
+# >>>>> ОБРАБОТКА ТЕКСТА <<<<< #
+#==========================================================================================#
+
+@Bot.message_handler(content_types = ["text"])
+def Text(Message: types.Message):
+	User = UsersManagerObject.auth(Message.from_user)
+	Functions.CheckSubscription(Master, Cacher, User, Settings["subscriptions"])
+
+	#==========================================================================================#
+	# >>>>> ПРОВЕРКА ЧЁРНОГО СПИСКА И НЕЦЕНЗУРНОЙ ЛЕКСИКИ <<<<< #
+	#==========================================================================================#
+
+	if Functions.CheckBlacklist(Message.text, Bot, Cacher, User): return
+
+	if ProfanityFilterObject.filter_text(Message.text):
+		Functions.AnswerToObscene(Bot, User)
+		return
+	
+	#==========================================================================================#
+	# >>>>> ОБРАБОТКА REPLY-КНОПОК <<<<< #
+	#==========================================================================================#
+
+	CaseBuffer = Message.text[2:] if len(Message.text) > 2 else None
+
+	match CaseBuffer:
+		case "Поделиться с друзьям": Functions.SendShareMessage(Bot, Cacher, User)
+		case "Переключить режим": Functions.SendModeSwitcher(Bot, User)
+
+#==========================================================================================#
+# >>>>> ОБРАБОТКА INLINE-КНОПОК <<<<< #
+#==========================================================================================#
+
+@Bot.callback_query_handler(func = lambda Callback: Callback.data == "after_subscribe")
+def InlineButton(Call: types.CallbackQuery):
+	User = UsersManagerObject.auth(Call.from_user)
+	Bot.answer_callback_query(Call.id)
+	if not Functions.CheckSubscription(Master, Cacher, User, Settings["subscriptions"], autosend = False): return
+	Master.safely_delete_messages(User.id, Call.message.id)
+
+	Bot.send_animation(
+		chat_id = User.id,
+		animation = Cacher.get_real_cached_file("Materials/Animation/after_subscribe.mp4", autoupload_type = types.InputMediaAnimation).file_id,
+		caption = "<b><i>" + "- Ну все, удачки в пользовании!)" + "</i></b>",
+		parse_mode = "HTML"
+	)
+
+@Bot.callback_query_handler(func = lambda Callback: Callback.data == "delete")
+def InlineButton(Call: types.CallbackQuery):
+	Master.safely_delete_messages(Call.from_user.id, Call.message.id)
+	
+@Bot.callback_query_handler(func = lambda Callback: Callback.data.startswith("switch_mode_"))
+def InlineButton(Call: types.CallbackQuery):
+	User = UsersManagerObject.auth(Call.from_user)
+	User.set_property("mode", Call.data[12:])
+	Master.safely_delete_messages(User.id, Call.message.id)
+
+Bot.infinity_polling()
